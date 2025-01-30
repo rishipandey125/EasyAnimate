@@ -306,6 +306,7 @@ class LoadEasyAnimateModel:
             convert_weight_dtype_wrapper(transformer, weight_dtype)
         else:
             pipeline.enable_model_cpu_offload()
+
         easyanimate_model = {
             'pipeline': pipeline, 
             'dtype': weight_dtype,
@@ -851,6 +852,8 @@ class EasyAnimateV2VSampler:
             "optional":{
                 "validation_video": ("IMAGE",),
                 "control_video": ("IMAGE",),
+                "start_image": ("IMAGE",),
+                "end_image": ("IMAGE",),
             },
         }
     
@@ -859,7 +862,7 @@ class EasyAnimateV2VSampler:
     FUNCTION = "process"
     CATEGORY = "EasyAnimateWrapper"
 
-    def process(self, easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video=None, control_video=None, ref_image=None, camera_conditions=None, teacache_threshold=0.10, enable_teacache=False):
+    def process(self, easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video=None, control_video=None, ref_image=None, start_image=None, end_image=None, camera_conditions=None, teacache_threshold=0.10, enable_teacache=False):
         global transformer_cpu_cache
         global lora_path_before
 
@@ -892,9 +895,14 @@ class EasyAnimateV2VSampler:
             else:
                 original_width, original_height = 384 / 512 * base_resolution, 672 / 512 * base_resolution
 
-            if ref_image is not None:
-                ref_image = [to_pil(_ref_image) for _ref_image in ref_image]
-                original_width, original_height = ref_image[0].size if type(ref_image) is list else Image.open(ref_image).size
+            #here - start by validating the start_image and the end_image 
+            if start_image is not None:
+                start_image = [to_pil(start_image) for start_image in start_image]
+                original_width, original_height = start_image[0].size if type(start_image) is list else Image.open(start_image).size
+            
+            if end_image is not None:
+                end_image = [to_pil(end_image) for end_image in end_image]
+                original_width, original_height = end_image[0].size if type(end_image) is list else Image.open(end_image).size
 
         closest_size, closest_ratio = get_closest_ratio(original_height, original_width, ratios=aspect_ratio_sample_size)
         height, width = [int(x / 16) * 16 for x in closest_size]
@@ -916,8 +924,10 @@ class EasyAnimateV2VSampler:
                 input_video, input_video_mask, clip_image = get_video_to_video_latent(validation_video, video_length=video_length, sample_size=(height, width), fps=8)
             else:
                 input_video, input_video_mask, clip_image = get_video_to_video_latent(control_video, video_length=video_length, sample_size=(height, width), fps=8)
-                if ref_image is not None:
-                    ref_image = get_image_latent(sample_size=(height, width), ref_image=ref_image[0])
+                if start_image is not None:
+                    start_image = get_image_latent(sample_size=(height, width), ref_image=start_image[0])
+                if end_image is not None:
+                    end_image = get_image_latent(sample_size=(height, width), ref_image=end_image[0])
                 if camera_conditions is not None and len(camera_conditions) > 0: 
                     poses      = json.loads(camera_conditions)
                     cam_params = np.array([[float(x) for x in pose] for pose in poses])
@@ -982,8 +992,8 @@ class EasyAnimateV2VSampler:
                     generator   = generator,
                     guidance_scale = cfg,
                     num_inference_steps = steps,
-
-                    ref_image = ref_image,
+                    start_image = start_image,
+                    end_image = end_image,
                     control_camera_video = control_camera_video,
                     control_video = input_video,
                     comfyui_progressbar = True,
@@ -1054,6 +1064,8 @@ class EasyAnimateV5_V2VSampler(EasyAnimateV2VSampler):
                 "control_video": ("IMAGE",),
                 "camera_conditions": ("STRING", {"forceInput": True}),
                 "ref_image": ("IMAGE",),
+                "start_image": ("IMAGE",),
+                "end_image": ("IMAGE",),
             },
         }
 

@@ -783,7 +783,8 @@ class EasyAnimateControlPipeline(DiffusionPipeline):
         width: Optional[int] = None,
         control_video: Union[torch.FloatTensor] = None,
         control_camera_video: Union[torch.FloatTensor] = None,
-        ref_image: Union[torch.FloatTensor] = None,
+        start_image: Union[torch.FloatTensor] = None,
+        end_image: Union[torch.FloatTensor] = None,
         num_inference_steps: Optional[int] = 50,
         guidance_scale: Optional[float] = 5.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,
@@ -1023,15 +1024,14 @@ class EasyAnimateControlPipeline(DiffusionPipeline):
                 torch.cat([control_video_latents] * 2) if self.do_classifier_free_guidance else control_video_latents
             ).to(device, dtype)
             
-        if ref_image is not None:
-            video_length = ref_image.shape[2]
-            ref_image = self.image_processor.preprocess(rearrange(ref_image, "b c f h w -> (b f) c h w"), height=height, width=width) 
-            ref_image = ref_image.to(dtype=torch.float32)
-            ref_image = rearrange(ref_image, "(b f) c h w -> b c f h w", f=video_length)
-            
-            ref_image_latentes = self.prepare_control_latents(
+        if (start_image is not None) and (end_image is not None):
+            video_length = start_image.shape[2]
+            start_image = self.image_processor.preprocess(rearrange(start_image, "b c f h w -> (b f) c h w"), height=height, width=width) 
+            start_image = start_image.to(dtype=torch.float32)
+            start_image = rearrange(start_image, "(b f) c h w -> b c f h w", f=video_length)
+            start_image_latentes = self.prepare_control_latents(
                 None,
-                ref_image,
+                start_image,
                 batch_size,
                 height,
                 width,
@@ -1041,20 +1041,63 @@ class EasyAnimateControlPipeline(DiffusionPipeline):
                 self.do_classifier_free_guidance
             )[1]
 
-            ref_image_latentes_conv_in = torch.zeros_like(latents)
+            video_length = end_image.shape[2]
+            end_image = self.image_processor.preprocess(rearrange(end_image, "b c f h w -> (b f) c h w"), height=height, width=width) 
+            end_image = end_image.to(dtype=torch.float32)
+            end_image = rearrange(end_image, "(b f) c h w -> b c f h w", f=video_length)
+            end_image_latentes = self.prepare_control_latents(
+                None,
+                end_image,
+                batch_size,
+                height,
+                width,
+                prompt_embeds.dtype,
+                device,
+                generator,
+                self.do_classifier_free_guidance
+            )[1]
+
+            latentes_conv_in = torch.zeros_like(latents)
+
             if latents.size()[2] != 1:
-                ref_image_latentes_conv_in[:, :, :1] = ref_image_latentes
-            ref_image_latentes_conv_in = (
-                torch.cat([ref_image_latentes_conv_in] * 2) if self.do_classifier_free_guidance else ref_image_latentes_conv_in
+                latentes_conv_in[:, :, :1] = start_image_latentes
+                latentes_conv_in[:, :, -1:] = end_image_latentes
+
+            latentes_conv_in = (
+                torch.cat([latentes_conv_in] * 2) if self.do_classifier_free_guidance else latentes_conv_in
             ).to(device, dtype)
-            control_latents = torch.cat([control_latents, ref_image_latentes_conv_in], dim = 1)
-        else:
+            control_latents = torch.cat([control_latents, latentes_conv_in], dim = 1)
+        elif start_image is not None: 
+            video_length = start_image.shape[2]
+            start_image = self.image_processor.preprocess(rearrange(start_image, "b c f h w -> (b f) c h w"), height=height, width=width) 
+            start_image = start_image.to(dtype=torch.float32)
+            start_image = rearrange(start_image, "(b f) c h w -> b c f h w", f=video_length)
+            start_image_latentes = self.prepare_control_latents(
+                None,
+                start_image,
+                batch_size,
+                height,
+                width,
+                prompt_embeds.dtype,
+                device,
+                generator,
+                self.do_classifier_free_guidance
+            )[1]
+
+            start_image_latentes_conv_in = torch.zeros_like(latents)
+            if latents.size()[2] != 1:
+                start_image_latentes_conv_in[:, :, :1] = start_image_latentes
+            start_image_latentes_conv_in = (
+                torch.cat([start_image_latentes_conv_in] * 2) if self.do_classifier_free_guidance else start_image_latentes_conv_in
+            ).to(device, dtype)
+            control_latents = torch.cat([control_latents, start_image_latentes_conv_in], dim = 1)
+        else:   
             if self.transformer.config.get("add_ref_latent_in_control_model", False):
-                ref_image_latentes_conv_in = torch.zeros_like(latents)
-                ref_image_latentes_conv_in = (
-                    torch.cat([ref_image_latentes_conv_in] * 2) if self.do_classifier_free_guidance else ref_image_latentes_conv_in
+                start_image_latentes_conv_in = torch.zeros_like(latents)
+                start_image_latentes_conv_in = (
+                    torch.cat([start_image_latentes_conv_in] * 2) if self.do_classifier_free_guidance else start_image_latentes_conv_in
                 ).to(device, dtype)
-                control_latents = torch.cat([control_latents, ref_image_latentes_conv_in], dim = 1)
+                control_latents = torch.cat([control_latents, start_image_latentes_conv_in], dim = 1)
 
         if comfyui_progressbar:
             pbar.update(1)
