@@ -853,6 +853,9 @@ class EasyAnimateV2VSampler:
                 "validation_video": ("IMAGE",),
                 "control_video": ("IMAGE",),
                 "start_image": ("IMAGE",),
+                "start_index": (
+                    "INT", {"default": 0, "min": 0, "max": 300, "step": 1}
+                ),
                 "end_image": ("IMAGE",),
             },
         }
@@ -862,7 +865,7 @@ class EasyAnimateV2VSampler:
     FUNCTION = "process"
     CATEGORY = "EasyAnimateWrapper"
 
-    def process(self, easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video=None, control_video=None, ref_image=None, start_image=None, end_image=None, camera_conditions=None, teacache_threshold=0.10, enable_teacache=False):
+    def process(self, easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video=None, control_video=None, ref_image=None, start_image=None, start_index=0, end_image=None, camera_conditions=None, teacache_threshold=0.10, enable_teacache=False):
         global transformer_cpu_cache
         global lora_path_before
 
@@ -872,14 +875,14 @@ class EasyAnimateV2VSampler:
         mm.soft_empty_cache()
         gc.collect()
         
-        # Get Pipeline
+        # Get Pipeline and model info
         pipeline = easyanimate_model['pipeline']
         model_name = easyanimate_model['model_name']
         weight_dtype = easyanimate_model['dtype']
         model_type = easyanimate_model['model_type']
 
-        # Count most suitable height and width
-        aspect_ratio_sample_size    = {key : [x / 512 * base_resolution for x in ASPECT_RATIO_512[key]] for key in ASPECT_RATIO_512.keys()}
+        # --- Resolution & Aspect Ratio Calculation (unchanged) ---
+        aspect_ratio_sample_size = {key: [x / 512 * base_resolution for x in ASPECT_RATIO_512[key]] for key in ASPECT_RATIO_512.keys()}
         if model_type == "Inpaint":
             if type(validation_video) is str:
                 original_width, original_height = Image.fromarray(cv2.VideoCapture(validation_video).read()[1]).size
@@ -895,39 +898,43 @@ class EasyAnimateV2VSampler:
             else:
                 original_width, original_height = 384 / 512 * base_resolution, 672 / 512 * base_resolution
 
-            #here - start by validating the start_image and the end_image 
+            # Validate start_image (and end_image, though not used)
             if start_image is not None:
-                start_image = [to_pil(start_image) for start_image in start_image]
+                start_image = [to_pil(img) for img in start_image]
                 original_width, original_height = start_image[0].size if type(start_image) is list else Image.open(start_image).size
             
             if end_image is not None:
-                end_image = [to_pil(end_image) for end_image in end_image]
+                end_image = [to_pil(img) for img in end_image]
                 original_width, original_height = end_image[0].size if type(end_image) is list else Image.open(end_image).size
 
         closest_size, closest_ratio = get_closest_ratio(original_height, original_width, ratios=aspect_ratio_sample_size)
         height, width = [int(x / 16) * 16 for x in closest_size]
 
-        # Load Sampler
+        # --- Load Scheduler & Setup TEA cache ---
         pipeline.scheduler = all_cheduler_dict[scheduler].from_pretrained(model_name, subfolder='scheduler')
-
         if enable_teacache:
             pipeline.transformer.enable_teacache(steps, teacache_threshold)
 
-        generator= torch.Generator(device).manual_seed(seed)
+        generator = torch.Generator(device).manual_seed(seed)
 
         with torch.no_grad():
+            # Adjust overall video_length if necessary (keep as is if video_length==1)
             if pipeline.vae.cache_mag_vae:
                 video_length = int((video_length - 1) // pipeline.vae.mini_batch_encoder * pipeline.vae.mini_batch_encoder) + 1 if video_length != 1 else 1
             else:
                 video_length = int(video_length // pipeline.vae.mini_batch_encoder * pipeline.vae.mini_batch_encoder) if video_length != 1 else 1
-            if model_type == "Inpaint":
-                input_video, input_video_mask, clip_image = get_video_to_video_latent(validation_video, video_length=video_length, sample_size=(height, width), fps=8)
-            else:
+
+            # --- For non-Inpaint (using control_video) ---
+            if model_type != "Inpaint":
+                # Process the full control video once into latents.
                 input_video, input_video_mask, clip_image = get_video_to_video_latent(control_video, video_length=video_length, sample_size=(height, width), fps=8)
+
+                # Convert the provided start_image into latent form.
                 if start_image is not None:
-                    start_image = get_image_latent(sample_size=(height, width), ref_image=start_image[0])
-                if end_image is not None:
-                    end_image = get_image_latent(sample_size=(height, width), ref_image=end_image[0])
+                    start_image_latent = get_image_latent(sample_size=(height, width), ref_image=start_image[0])
+                else:
+                    start_image_latent = None  # (Should normally be provided.)
+
                 if camera_conditions is not None and len(camera_conditions) > 0: 
                     poses      = json.loads(camera_conditions)
                     cam_params = np.array([[float(x) for x in pose] for pose in poses])
@@ -937,35 +944,152 @@ class EasyAnimateV2VSampler:
                 else:
                     control_camera_video = None
 
-            # Apply lora
-            if easyanimate_model.get("lora_cache", False):
-                if len(easyanimate_model.get("loras", [])) != 0:
-                    # Save the original weights to cpu
-                    if len(transformer_cpu_cache) == 0:
-                        print('Save transformer state_dict to cpu memory')
-                        transformer_state_dict = pipeline.transformer.state_dict()
-                        for key in transformer_state_dict:
-                            transformer_cpu_cache[key] = transformer_state_dict[key].clone().cpu()
-                    
-                    lora_path_now = str(easyanimate_model.get("loras", []) + easyanimate_model.get("strength_model", []))
-                    if lora_path_now != lora_path_before:
-                        print('Merge Lora with Cache')
-                        lora_path_before = copy.deepcopy(lora_path_now)
-                        pipeline.transformer.load_state_dict(transformer_cpu_cache)
-                        for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
-                            pipeline = merge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
-            else:
-                # Clear lora when switch from lora_cache=True to lora_cache=False.
-                if len(transformer_cpu_cache) != 0:
-                    pipeline.transformer.load_state_dict(transformer_cpu_cache)
-                    transformer_cpu_cache = {}
-                    lora_path_before = ""
-                    gc.collect()
-                print('Merge Lora')
-                for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
-                    pipeline = merge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
+                # --- Helper: Allowed segment lengths based on VDM constraint ---
+                def get_next_allowed_value(n):
+                    # For n > 1, allowed values are 5, 9, 13, ... 49.
+                    if n <= 1:
+                        return 1
+                    allowed = [5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49]
+                    for v in allowed:
+                        if n <= v:
+                            return v
+                    return 49
 
-            if model_type == "Inpaint":
+                # --- Helper: Process one chain (forward or reverse) ---
+                def process_chain(chain_latents, chain_total, init_start_latent, direction="forward"):
+                    """
+                    chain_latents: latent slice for this chain, shape (b, c, T, h, w)
+                    chain_total: desired total frames in the chain (including the initial stylized frame)
+                    init_start_latent: the starting style latent for this chain.
+                    direction: "forward" or "reverse" (for reverse, chain_latents is assumed already time-reversed)
+                    Returns: a tensor of shape (b, c, chain_total, h, w)
+                    """
+                    # If no new frames are needed, just return the starting latent.
+                    if chain_total == 1:
+                        return init_start_latent.unsqueeze(2)  # add time dim
+
+                    out_chain = []  # list to collect segments (each a tensor of shape (b, c, seg_frames, h, w))
+                    current_start = init_start_latent  # current stylized latent to feed as start_image
+
+                    # remaining frames to generate in this chain (including current_start)
+                    remaining = chain_total  
+                    offset = 0  # offset into chain_latents (control frames)
+                    # new frames needed (excluding the starting frame)
+                    new_frames_needed = chain_total - 1
+
+                    while new_frames_needed > 0:
+                        # For this segment, the desired total (including the start frame) is:
+                        desired = min(new_frames_needed + 1, 49)
+                        # Adjust to the next allowed value (pad if needed)
+                        allowed = get_next_allowed_value(desired)
+                        pad = allowed - desired  # number of extra frames to be generated (and later trimmed)
+
+                        # Number of new frames we aim to get from this segment:
+                        seg_new_frames = desired - 1  # note: pipeline call will produce 'allowed' frames (including start)
+                        
+                        # --- Extract corresponding control-video latents for this segment ---
+                        # Determine how many control frames are available in chain_latents starting at offset.
+                        available = chain_latents.shape[2] - offset
+                        if available < seg_new_frames:
+                            # If not enough, take what's available and then pad by repeating the last frame.
+                            seg_control = chain_latents[:, :, offset:offset+available]
+                            pad_tensor = seg_control[:, :, -1:].repeat(1, 1, seg_new_frames - available)
+                            seg_control = torch.cat([seg_control, pad_tensor], dim=2)
+                        else:
+                            seg_control = chain_latents[:, :, offset:offset+seg_new_frames]
+                        # If padding is needed to meet the allowed length, pad seg_control further.
+                        if pad > 0:
+                            pad_tensor = seg_control[:, :, -1:].repeat(1, 1, pad)
+                            seg_control = torch.cat([seg_control, pad_tensor], dim=2)
+                        # Now, seg_control has shape (b, c, allowed - 1, h, w)
+
+                        # Call the pipeline for this segment.
+                        seg_out = pipeline(
+                            prompt,
+                            video_length = allowed,
+                            negative_prompt = negative_prompt,
+                            height = height,
+                            width = width,
+                            generator = generator,
+                            guidance_scale = cfg,
+                            num_inference_steps = steps,
+                            start_image = current_start,
+                            # We pass the segment’s control video latents:
+                            control_video = seg_control,
+                            comfyui_progressbar = True,
+                        ).frames  # shape: (b, c, allowed, h, w)
+
+                        # Trim the output to remove padded frames.
+                        # For the first segment, we want to keep 'desired' frames.
+                        # For subsequent segments, the first frame is duplicate, so we drop it.
+                        if offset == 0:
+                            seg_trim = seg_out[:, :, :desired, :, :]
+                        else:
+                            seg_trim = seg_out[:, :, 1:desired, :, :]
+                        # Update the current_start with the last frame of this segment.
+                        current_start = seg_trim[:, :, -1, :, :]
+                        # Append the segment (if not the first segment, we already dropped duplicate) 
+                        out_chain.append(seg_trim)
+                        # Advance the offset by the number of new frames produced (which is desired-1)
+                        offset += (desired - 1)
+                        new_frames_needed -= (desired - 1)
+                    # Concatenate all segments along the time dimension.
+                    # For the first segment, we kept the full segment (including starting frame).
+                    chain_tensor = torch.cat(out_chain, dim=2)
+                    return chain_tensor
+
+                # --- Define the chains based on start_index ---
+                # The final desired video has total 'video_length' frames.
+                # The provided stylized frame is at position 'start_index'.
+                # Forward chain: from start_index to end.
+                # Reverse chain: from 0 to start_index.
+                forward_total = video_length - start_index  # at least 1
+                reverse_total = start_index + 1             # at least 1
+
+                # Extract the corresponding slices from input_video latents.
+                # For forward chain: frames from start_index onward.
+                if forward_total > 0:
+                    forward_latents = input_video[:, :, start_index:, :, :]
+                else:
+                    forward_latents = None
+
+                # For reverse chain: frames before start_index.
+                if reverse_total > 0:
+                    reverse_latents = input_video[:, :, :start_index, :, :]
+                    # Reverse the time dimension so that processing goes "backwards".
+                    reverse_latents = reverse_latents.flip(dims=[2])
+                else:
+                    reverse_latents = None
+
+                # Process forward chain (if more than just the stylized frame is needed).
+                if forward_total > 1:
+                    forward_chain = process_chain(forward_latents, forward_total, start_image_latent, direction="forward")
+                else:
+                    forward_chain = start_image_latent.unsqueeze(2)
+                    
+                # Process reverse chain (if available).
+                if reverse_total > 1:
+                    reverse_chain = process_chain(reverse_latents, reverse_total, start_image_latent, direction="reverse")
+                    # After processing, flip reverse chain back into proper order.
+                    reverse_chain = reverse_chain.flip(dims=[2])
+                else:
+                    reverse_chain = start_image_latent.unsqueeze(2)
+
+                # --- Merge the two chains ---
+                # Avoid duplicating the stylized frame (which appears as the last frame of reverse_chain and first frame of forward_chain).
+                # If both chains exist, remove the first frame of forward_chain.
+                if reverse_chain is not None and forward_chain is not None:
+                    # Exclude the first frame of forward_chain.
+                    merged = torch.cat([reverse_chain, forward_chain[:, :, 1:, :, :]], dim=2)
+                elif forward_chain is not None:
+                    merged = forward_chain
+                else:
+                    merged = reverse_chain
+
+                # Rearrange the merged tensor to have shape (total_frames, height, width, channels)
+                sample = merged  # shape (b, c, t, h, w)
+            else:
+                # Inpaint branch (unchanged)
                 sample = pipeline(
                     prompt, 
                     video_length = video_length,
@@ -975,36 +1099,23 @@ class EasyAnimateV2VSampler:
                     generator   = generator,
                     guidance_scale = cfg,
                     num_inference_steps = steps,
-
                     video        = input_video,
                     mask_video   = input_video_mask,
                     clip_image   = clip_image, 
                     strength = float(denoise_strength),
                     comfyui_progressbar = True,
                 ).frames
-            else:
-                sample = pipeline(
-                    prompt, 
-                    video_length = video_length,
-                    negative_prompt = negative_prompt,
-                    height      = height,
-                    width       = width,
-                    generator   = generator,
-                    guidance_scale = cfg,
-                    num_inference_steps = steps,
-                    start_image = start_image,
-                    end_image = end_image,
-                    control_camera_video = control_camera_video,
-                    control_video = input_video,
-                    comfyui_progressbar = True,
-                ).frames
+
+            # Rearrange frames from (b, c, t, h, w) to (b*t, h, w, c)
             videos = rearrange(sample, "b c t h w -> (b t) h w c")
 
+            # --- Unmerge LoRA if necessary ---
             if not easyanimate_model.get("lora_cache", False):
                 print('Unmerge Lora')
                 for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
                     pipeline = unmerge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
-        return (videos,)   
+        return (videos,)
+
 
 class EasyAnimateV5_V2VSampler(EasyAnimateV2VSampler):
     @classmethod
@@ -1065,6 +1176,9 @@ class EasyAnimateV5_V2VSampler(EasyAnimateV2VSampler):
                 "camera_conditions": ("STRING", {"forceInput": True}),
                 "ref_image": ("IMAGE",),
                 "start_image": ("IMAGE",),
+                "start_index": (
+                    "INT", {"default": 0, "min": 0, "max": 300, "step": 1}
+                ),
                 "end_image": ("IMAGE",),
             },
         }
