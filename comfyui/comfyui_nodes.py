@@ -818,29 +818,19 @@ def vdm_process(easyanimate_model, prompt, negative_prompt, video_length, base_r
 
     # Count most suitable height and width
     aspect_ratio_sample_size    = {key : [x / 512 * base_resolution for x in ASPECT_RATIO_512[key]] for key in ASPECT_RATIO_512.keys()}
-    if model_type == "Inpaint":
-        if type(validation_video) is str:
-            original_width, original_height = Image.fromarray(cv2.VideoCapture(validation_video).read()[1]).size
-        else:
-            validation_video = np.array(validation_video.cpu().numpy() * 255, np.uint8)
-            original_width, original_height = Image.fromarray(validation_video[0]).size
-    else:
-        if control_video is not None and type(control_video) is str:
-            original_width, original_height = Image.fromarray(cv2.VideoCapture(control_video).read()[1]).size
-        elif control_video is not None:
-            control_video = np.array(control_video.cpu().numpy() * 255, np.uint8)
-            original_width, original_height = Image.fromarray(control_video[0]).size
-        else:
-            original_width, original_height = 384 / 512 * base_resolution, 672 / 512 * base_resolution
 
-        #here - start by validating the start_image and the end_image 
-        if start_image is not None:
-            start_image = [to_pil(start_image) for start_image in start_image]
-            original_width, original_height = start_image[0].size if type(start_image) is list else Image.open(start_image).size
-        
-        if end_image is not None:
-            end_image = [to_pil(end_image) for end_image in end_image]
-            original_width, original_height = end_image[0].size if type(end_image) is list else Image.open(end_image).size
+    if control_video is not None and type(control_video) is str:
+        original_width, original_height = Image.fromarray(cv2.VideoCapture(control_video).read()[1]).size
+    elif control_video is not None:
+        control_video = np.array(control_video.cpu().numpy() * 255, np.uint8)
+        original_width, original_height = Image.fromarray(control_video[0]).size
+    else:
+        original_width, original_height = 384 / 512 * base_resolution, 672 / 512 * base_resolution
+
+    #here - start by validating the start_image and the end_image 
+    if start_image is not None:
+        start_image = [to_pil(start_image) for start_image in start_image]
+        original_width, original_height = start_image[0].size if type(start_image) is list else Image.open(start_image).size
 
     closest_size, closest_ratio = get_closest_ratio(original_height, original_width, ratios=aspect_ratio_sample_size)
     height, width = [int(x / 16) * 16 for x in closest_size]
@@ -858,84 +848,54 @@ def vdm_process(easyanimate_model, prompt, negative_prompt, video_length, base_r
             video_length = int((video_length - 1) // pipeline.vae.mini_batch_encoder * pipeline.vae.mini_batch_encoder) + 1 if video_length != 1 else 1
         else:
             video_length = int(video_length // pipeline.vae.mini_batch_encoder * pipeline.vae.mini_batch_encoder) if video_length != 1 else 1
-        if model_type == "Inpaint":
-            input_video, input_video_mask, clip_image = get_video_to_video_latent(validation_video, video_length=video_length, sample_size=(height, width), fps=8)
-        else:
-            input_video, input_video_mask, clip_image = get_video_to_video_latent(control_video, video_length=video_length, sample_size=(height, width), fps=8)
-            if start_image is not None:
-                start_image = get_image_latent(sample_size=(height, width), ref_image=start_image[0])
-            if end_image is not None:
-                end_image = get_image_latent(sample_size=(height, width), ref_image=end_image[0])
-            if camera_conditions is not None and len(camera_conditions) > 0: 
-                poses      = json.loads(camera_conditions)
-                cam_params = np.array([[float(x) for x in pose] for pose in poses])
-                cam_params = np.concatenate([np.zeros_like(cam_params[:, :1]), cam_params], 1)
-                control_camera_video = process_pose_params(cam_params, width=width, height=height)
-                control_camera_video = control_camera_video[:video_length].permute([3, 0, 1, 2]).unsqueeze(0)
-            else:
-                control_camera_video = None
+
+        input_video, input_video_mask, clip_image = get_video_to_video_latent(control_video, video_length=video_length, sample_size=(height, width), fps=8)
+        if start_image is not None:
+            start_image = get_image_latent(sample_size=(height, width), ref_image=start_image[0])
 
         # Apply lora
-        if easyanimate_model.get("lora_cache", False):
-            if len(easyanimate_model.get("loras", [])) != 0:
-                # Save the original weights to cpu
-                if len(transformer_cpu_cache) == 0:
-                    print('Save transformer state_dict to cpu memory')
-                    transformer_state_dict = pipeline.transformer.state_dict()
-                    for key in transformer_state_dict:
-                        transformer_cpu_cache[key] = transformer_state_dict[key].clone().cpu()
+        # if easyanimate_model.get("lora_cache", False):
+        #     if len(easyanimate_model.get("loras", [])) != 0:
+        #         # Save the original weights to cpu
+        #         if len(transformer_cpu_cache) == 0:
+        #             print('Save transformer state_dict to cpu memory')
+        #             transformer_state_dict = pipeline.transformer.state_dict()
+        #             for key in transformer_state_dict:
+        #                 transformer_cpu_cache[key] = transformer_state_dict[key].clone().cpu()
                 
-                lora_path_now = str(easyanimate_model.get("loras", []) + easyanimate_model.get("strength_model", []))
-                if lora_path_now != lora_path_before:
-                    print('Merge Lora with Cache')
-                    lora_path_before = copy.deepcopy(lora_path_now)
-                    pipeline.transformer.load_state_dict(transformer_cpu_cache)
-                    for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
-                        pipeline = merge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
-        else:
-            # Clear lora when switch from lora_cache=True to lora_cache=False.
-            if len(transformer_cpu_cache) != 0:
-                pipeline.transformer.load_state_dict(transformer_cpu_cache)
-                transformer_cpu_cache = {}
-                lora_path_before = ""
-                gc.collect()
-            print('Merge Lora')
-            for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
-                pipeline = merge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
+        #         lora_path_now = str(easyanimate_model.get("loras", []) + easyanimate_model.get("strength_model", []))
+        #         if lora_path_now != lora_path_before:
+        #             print('Merge Lora with Cache')
+        #             lora_path_before = copy.deepcopy(lora_path_now)
+        #             pipeline.transformer.load_state_dict(transformer_cpu_cache)
+        #             for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
+        #                 pipeline = merge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
+        # else:
+        #     # Clear lora when switch from lora_cache=True to lora_cache=False.
+        #     if len(transformer_cpu_cache) != 0:
+        #         pipeline.transformer.load_state_dict(transformer_cpu_cache)
+        #         transformer_cpu_cache = {}
+        #         lora_path_before = ""
+        #         gc.collect()
+        #     print('Merge Lora')
+        #     for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
+        #         pipeline = merge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
 
-        if model_type == "Inpaint":
-            sample = pipeline(
-                prompt, 
-                video_length = video_length,
-                negative_prompt = negative_prompt,
-                height      = height,
-                width       = width,
-                generator   = generator,
-                guidance_scale = cfg,
-                num_inference_steps = steps,
 
-                video        = input_video,
-                mask_video   = input_video_mask,
-                clip_image   = clip_image, 
-                strength = float(denoise_strength),
-                comfyui_progressbar = True,
-            ).frames
-        else:
-            sample = pipeline(
-                prompt, 
-                video_length = video_length,
-                negative_prompt = negative_prompt,
-                height      = height,
-                width       = width,
-                generator   = generator,
-                guidance_scale = cfg,
-                num_inference_steps = steps,
-                start_image = start_image,
-                end_image = end_image,
-                control_camera_video = control_camera_video,
-                control_video = input_video,
-                comfyui_progressbar = True,
-            ).frames
+        sample = pipeline(
+            prompt, 
+            video_length = video_length,
+            negative_prompt = negative_prompt,
+            height      = height,
+            width       = width,
+            generator   = generator,
+            guidance_scale = cfg,
+            num_inference_steps = steps,
+            start_image = start_image,
+            control_video = input_video,
+            comfyui_progressbar = True,
+        ).frames
+
         videos = rearrange(sample, "b c t h w -> (b t) h w c")
 
         if not easyanimate_model.get("lora_cache", False):
