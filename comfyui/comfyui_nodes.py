@@ -799,6 +799,150 @@ class EasyAnimateV5_I2VSampler(EasyAnimateI2VSampler):
             },
         }
 
+def vdm_process(easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video=None, control_video=None, ref_image=None, start_image=None, end_image=None, camera_conditions=None, teacache_threshold=0.10, enable_teacache=False):
+    global transformer_cpu_cache
+    global lora_path_before
+
+    device = mm.get_torch_device()
+    offload_device = mm.unet_offload_device()
+
+    mm.soft_empty_cache()
+    gc.collect()
+    
+    # Get Pipeline
+    pipeline = easyanimate_model['pipeline']
+    model_name = easyanimate_model['model_name']
+    weight_dtype = easyanimate_model['dtype']
+    model_type = easyanimate_model['model_type']
+
+    # Count most suitable height and width
+    aspect_ratio_sample_size    = {key : [x / 512 * base_resolution for x in ASPECT_RATIO_512[key]] for key in ASPECT_RATIO_512.keys()}
+    if model_type == "Inpaint":
+        if type(validation_video) is str:
+            original_width, original_height = Image.fromarray(cv2.VideoCapture(validation_video).read()[1]).size
+        else:
+            validation_video = np.array(validation_video.cpu().numpy() * 255, np.uint8)
+            original_width, original_height = Image.fromarray(validation_video[0]).size
+    else:
+        if control_video is not None and type(control_video) is str:
+            original_width, original_height = Image.fromarray(cv2.VideoCapture(control_video).read()[1]).size
+        elif control_video is not None:
+            control_video = np.array(control_video.cpu().numpy() * 255, np.uint8)
+            original_width, original_height = Image.fromarray(control_video[0]).size
+        else:
+            original_width, original_height = 384 / 512 * base_resolution, 672 / 512 * base_resolution
+
+        #here - start by validating the start_image and the end_image 
+        if start_image is not None:
+            start_image = [to_pil(start_image) for start_image in start_image]
+            original_width, original_height = start_image[0].size if type(start_image) is list else Image.open(start_image).size
+        
+        if end_image is not None:
+            end_image = [to_pil(end_image) for end_image in end_image]
+            original_width, original_height = end_image[0].size if type(end_image) is list else Image.open(end_image).size
+
+    closest_size, closest_ratio = get_closest_ratio(original_height, original_width, ratios=aspect_ratio_sample_size)
+    height, width = [int(x / 16) * 16 for x in closest_size]
+
+    # Load Sampler
+    pipeline.scheduler = all_cheduler_dict[scheduler].from_pretrained(model_name, subfolder='scheduler')
+
+    if enable_teacache:
+        pipeline.transformer.enable_teacache(steps, teacache_threshold)
+
+    generator= torch.Generator(device).manual_seed(seed)
+
+    with torch.no_grad():
+        if pipeline.vae.cache_mag_vae:
+            video_length = int((video_length - 1) // pipeline.vae.mini_batch_encoder * pipeline.vae.mini_batch_encoder) + 1 if video_length != 1 else 1
+        else:
+            video_length = int(video_length // pipeline.vae.mini_batch_encoder * pipeline.vae.mini_batch_encoder) if video_length != 1 else 1
+        if model_type == "Inpaint":
+            input_video, input_video_mask, clip_image = get_video_to_video_latent(validation_video, video_length=video_length, sample_size=(height, width), fps=8)
+        else:
+            input_video, input_video_mask, clip_image = get_video_to_video_latent(control_video, video_length=video_length, sample_size=(height, width), fps=8)
+            if start_image is not None:
+                start_image = get_image_latent(sample_size=(height, width), ref_image=start_image[0])
+            if end_image is not None:
+                end_image = get_image_latent(sample_size=(height, width), ref_image=end_image[0])
+            if camera_conditions is not None and len(camera_conditions) > 0: 
+                poses      = json.loads(camera_conditions)
+                cam_params = np.array([[float(x) for x in pose] for pose in poses])
+                cam_params = np.concatenate([np.zeros_like(cam_params[:, :1]), cam_params], 1)
+                control_camera_video = process_pose_params(cam_params, width=width, height=height)
+                control_camera_video = control_camera_video[:video_length].permute([3, 0, 1, 2]).unsqueeze(0)
+            else:
+                control_camera_video = None
+
+        # Apply lora
+        if easyanimate_model.get("lora_cache", False):
+            if len(easyanimate_model.get("loras", [])) != 0:
+                # Save the original weights to cpu
+                if len(transformer_cpu_cache) == 0:
+                    print('Save transformer state_dict to cpu memory')
+                    transformer_state_dict = pipeline.transformer.state_dict()
+                    for key in transformer_state_dict:
+                        transformer_cpu_cache[key] = transformer_state_dict[key].clone().cpu()
+                
+                lora_path_now = str(easyanimate_model.get("loras", []) + easyanimate_model.get("strength_model", []))
+                if lora_path_now != lora_path_before:
+                    print('Merge Lora with Cache')
+                    lora_path_before = copy.deepcopy(lora_path_now)
+                    pipeline.transformer.load_state_dict(transformer_cpu_cache)
+                    for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
+                        pipeline = merge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
+        else:
+            # Clear lora when switch from lora_cache=True to lora_cache=False.
+            if len(transformer_cpu_cache) != 0:
+                pipeline.transformer.load_state_dict(transformer_cpu_cache)
+                transformer_cpu_cache = {}
+                lora_path_before = ""
+                gc.collect()
+            print('Merge Lora')
+            for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
+                pipeline = merge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
+
+        if model_type == "Inpaint":
+            sample = pipeline(
+                prompt, 
+                video_length = video_length,
+                negative_prompt = negative_prompt,
+                height      = height,
+                width       = width,
+                generator   = generator,
+                guidance_scale = cfg,
+                num_inference_steps = steps,
+
+                video        = input_video,
+                mask_video   = input_video_mask,
+                clip_image   = clip_image, 
+                strength = float(denoise_strength),
+                comfyui_progressbar = True,
+            ).frames
+        else:
+            sample = pipeline(
+                prompt, 
+                video_length = video_length,
+                negative_prompt = negative_prompt,
+                height      = height,
+                width       = width,
+                generator   = generator,
+                guidance_scale = cfg,
+                num_inference_steps = steps,
+                start_image = start_image,
+                end_image = end_image,
+                control_camera_video = control_camera_video,
+                control_video = input_video,
+                comfyui_progressbar = True,
+            ).frames
+        videos = rearrange(sample, "b c t h w -> (b t) h w c")
+
+        if not easyanimate_model.get("lora_cache", False):
+            print('Unmerge Lora')
+            for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
+                pipeline = unmerge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
+    return videos   
+
 class EasyAnimateV2VSampler:
     @classmethod
     def INPUT_TYPES(s):
@@ -866,148 +1010,7 @@ class EasyAnimateV2VSampler:
     CATEGORY = "EasyAnimateWrapper"
 
     def process(self, easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video=None, control_video=None, ref_image=None, start_image=None, start_index=0, end_image=None, camera_conditions=None, teacache_threshold=0.10, enable_teacache=False):
-        global transformer_cpu_cache
-        global lora_path_before
 
-        device = mm.get_torch_device()
-        offload_device = mm.unet_offload_device()
-
-        mm.soft_empty_cache()
-        gc.collect()
-    
-
-        # Count most suitable height and width
-        aspect_ratio_sample_size    = {key : [x / 512 * base_resolution for x in ASPECT_RATIO_512[key]] for key in ASPECT_RATIO_512.keys()}
-
-
-        # --- Helper: Allowed segment lengths based on VDM constraint ---
-        def get_next_allowed_value(n):
-            # For n > 1, allowed values are 5, 9, 13, ... 49.
-            if n <= 1:
-                return 1
-            allowed = [5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49]
-            for v in allowed:
-                if n <= v:
-                    return v
-            return 49
-        
-        def process_chain(control_chain, chain_total, init_start_image, direction="forward"): 
-            # Get Pipeline
-
-            pipeline = easyanimate_model['pipeline']
-            model_name = easyanimate_model['model_name']
-            weight_dtype = easyanimate_model['dtype']
-            model_type = easyanimate_model['model_type']
-
-            if chain_total == 1:
-                return init_start_image
-            
-            out_chain = []
-            current_start = start_image
-
-            remaining = chain_total
-            offset = 0
-
-            new_frames_needed = chain_total - 1
-
-            # while new_frames_needed > 0:
-            #     desired = min(new_frames_needed + 1, 49)
-
-            #     allowed = get_next_allowed_value(desired)
-            #     pad = allowed - desired 
-
-            #     seg_new_frames = desired - 1
-
-
-            # if control_chain is not None and type(control_chain) is str:
-            #     original_width, original_height = Image.fromarray(cv2.VideoCapture(control_chain).read()[1]).size
-            if control_chain is not None:
-                control_chain = np.array(control_chain.cpu().numpy() * 255, np.uint8)
-                original_width, original_height = Image.fromarray(control_chain[0]).size
-            else:
-                original_width, original_height = 384 / 512 * base_resolution, 672 / 512 * base_resolution
-
-            #here - start by validating the start_image and the end_image 
-            if init_start_image is not None:
-                init_start_image = [to_pil(init_start_image) for init_start_image in init_start_image]
-                original_width, original_height = init_start_image[0].size if type(init_start_image) is list else Image.open(init_start_image).size
-        
-
-            closest_size, closest_ratio = get_closest_ratio(original_height, original_width, ratios=aspect_ratio_sample_size)
-            height, width = [int(x / 16) * 16 for x in closest_size]
-
-            # Load Sampler
-            pipeline.scheduler = all_cheduler_dict[scheduler].from_pretrained(model_name, subfolder='scheduler')
-
-            if enable_teacache:
-                pipeline.transformer.enable_teacache(steps, teacache_threshold)
-
-            generator= torch.Generator(device).manual_seed(seed)
-
-            with torch.no_grad():
-                video_length = chain_total #for now
-      
-
-                input_video, input_video_mask, clip_image = get_video_to_video_latent(control_chain, video_length=video_length, sample_size=(height, width), fps=8)
-
-                if init_start_image is not None:
-                    init_start_image = get_image_latent(sample_size=(height, width), ref_image=start_image[0])
-
-                # # Apply lora
-                # if easyanimate_model.get("lora_cache", False):
-                #     if len(easyanimate_model.get("loras", [])) != 0:
-                #         # Save the original weights to cpu
-                #         if len(transformer_cpu_cache) == 0:
-                #             print('Save transformer state_dict to cpu memory')
-                #             transformer_state_dict = pipeline.transformer.state_dict()
-                #             for key in transformer_state_dict:
-                #                 transformer_cpu_cache[key] = transformer_state_dict[key].clone().cpu()
-                        
-                #         lora_path_now = str(easyanimate_model.get("loras", []) + easyanimate_model.get("strength_model", []))
-                #         if lora_path_now != lora_path_before:
-                #             print('Merge Lora with Cache')
-                #             lora_path_before = copy.deepcopy(lora_path_now)
-                #             pipeline.transformer.load_state_dict(transformer_cpu_cache)
-                #             for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
-                #                 pipeline = merge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
-                # else:
-                #     # Clear lora when switch from lora_cache=True to lora_cache=False.
-                #     if len(transformer_cpu_cache) != 0:
-                #         pipeline.transformer.load_state_dict(transformer_cpu_cache)
-                #         transformer_cpu_cache = {}
-                #         lora_path_before = ""
-                #         gc.collect()
-                #     print('Merge Lora')
-                #     for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
-                #         pipeline = merge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
-                sample = pipeline(
-                    prompt, 
-                    video_length = video_length,
-                    negative_prompt = negative_prompt,
-                    height      = height,
-                    width       = width,
-                    generator   = generator,
-                    guidance_scale = cfg,
-                    num_inference_steps = steps,
-                    start_image = init_start_image,
-                    control_video = input_video,
-                    comfyui_progressbar = True,
-                ).frames
-
-                videos = rearrange(sample, "b c t h w -> (b t) h w c")
-
-                
-                if not easyanimate_model.get("lora_cache", False):
-                    print('Unmerge Lora')
-                    for _lora_path, _lora_weight in zip(easyanimate_model.get("loras", []), easyanimate_model.get("strength_model", [])):
-                        pipeline = unmerge_lora(pipeline, _lora_path, _lora_weight, device="cuda", dtype=weight_dtype)
-                return videos
-                #here is the end of where the VDM should be 
-            #you could access the next "start_frame" by doing something like videos[-1,:,:,:]
-            
-        #so first we want to split it up by a forward pass and a backwards pass 
-        
-        
         forward_total = video_length - start_index
         reverse_total = start_index + 1
 
@@ -1023,20 +1026,31 @@ class EasyAnimateV2VSampler:
             
         # call forward chain
         if forward_total > 1: 
-            forward_chain = process_chain(forward_control, forward_total, start_image, direction="forward")
+            forward_chain = vdm_process(easyanimate_model, prompt, negative_prompt, forward_total, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, forward_control, ref_image, start_image, end_image, camera_conditions, teacache_threshold, enable_teacache)
         else:
             forward_chain = start_image
 
-        # call backward chain
-        # if reverse_total > 1: 
-        #     reverse_chain = process_chain(reverse_control, reverse_total, start_image, direction="reverse")
-        #     #flip that shit back 
-        # else:
-        #     reverse_chain = start_image
-        
-        #merge both the chains (code TODO)
 
-        return (forward_chain,)   
+        # # call backward chain
+        if reverse_total > 1: 
+            reverse_chain = vdm_process(easyanimate_model, prompt, negative_prompt, forward_total, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, reverse_control, ref_image, start_image, end_image, camera_conditions, teacache_threshold, enable_teacache)
+            reverse_chain = reverse_control.flip(0)
+            #flip that shit back 
+        else:
+            reverse_chain = start_image
+        
+        # #merge both the chains (code TODO)
+        # if isinstance(forward_chain, list) and isinstance(reverse_chain, list):
+        #     print("list concat")
+        #     # Remove duplicate: drop the first frame of the forward chain.
+        #     merged_chain = reverse_chain + forward_chain[1:]
+        # else:
+        #     print("torch concat")
+        #     # If they are tensors, you could use torch.cat (adjust dimensions as needed).
+        #     merged_chain = torch.cat([reverse_chain, forward_chain[:, 1:]], dim=0)
+        merged_chain = reverse_chain + forward_chain[1:, :, :, :]
+         # if this doesn't work - return everything as a (video,) and return below just as merged_chain
+        return (merged_chain,)   
 
 
 class EasyAnimateV5_V2VSampler(EasyAnimateV2VSampler):
