@@ -1026,30 +1026,24 @@ class EasyAnimateV2VSampler:
             
         # call forward chain
         if forward_total > 1: 
+            #integrate logic here to handle the forward chain + sub chains 
             forward_chain = vdm_process(easyanimate_model, prompt, negative_prompt, forward_total, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, forward_control, ref_image, start_image, end_image, camera_conditions, teacache_threshold, enable_teacache)
         else:
             forward_chain = start_image
 
 
-        # # call backward chain
+        # call backward chain
         if reverse_total > 1: 
+            #integrate logic here to handle the forward chain + sub chains
             reverse_chain = vdm_process(easyanimate_model, prompt, negative_prompt, forward_total, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, reverse_control, ref_image, start_image, end_image, camera_conditions, teacache_threshold, enable_teacache)
-            reverse_chain = reverse_control.flip(0)
+            reverse_chain = reverse_chain.flip(0)
             #flip that shit back 
         else:
             reverse_chain = start_image
         
-        # #merge both the chains (code TODO)
-        # if isinstance(forward_chain, list) and isinstance(reverse_chain, list):
-        #     print("list concat")
-        #     # Remove duplicate: drop the first frame of the forward chain.
-        #     merged_chain = reverse_chain + forward_chain[1:]
-        # else:
-        #     print("torch concat")
-        #     # If they are tensors, you could use torch.cat (adjust dimensions as needed).
-        #     merged_chain = torch.cat([reverse_chain, forward_chain[:, 1:]], dim=0)
-        merged_chain = reverse_chain + forward_chain[1:, :, :, :]
-         # if this doesn't work - return everything as a (video,) and return below just as merged_chain
+        #combine the chains 
+        merged_chain = torch.cat((reverse_chain, forward_chain[1:]), dim=0)
+
         return (merged_chain,)   
 
 
