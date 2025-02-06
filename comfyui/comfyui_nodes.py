@@ -995,13 +995,11 @@ class EasyAnimateV2VSampler:
                 ),
             },
             "optional":{
-                "validation_video": ("IMAGE",),
                 "control_video": ("IMAGE",),
                 "start_image": ("IMAGE",),
                 "start_index": (
                     "INT", {"default": 0, "min": 0, "max": 300, "step": 1}
                 ),
-                "end_image": ("IMAGE",),
             },
         }
     
@@ -1216,15 +1214,11 @@ class EasyAnimateV5_V2VSampler(EasyAnimateV2VSampler):
                 "enable_teacache":([False, True],  {"default": True,}),
             },
             "optional":{
-                "validation_video": ("IMAGE",),
                 "control_video": ("IMAGE",),
-                "camera_conditions": ("STRING", {"forceInput": True}),
-                "ref_image": ("IMAGE",),
                 "start_image": ("IMAGE",),
                 "start_index": (
                     "INT", {"default": 0, "min": 0, "max": 300, "step": 1}
                 ),
-                "end_image": ("IMAGE",),
             },
         }
 
