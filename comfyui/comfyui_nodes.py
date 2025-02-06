@@ -800,7 +800,7 @@ class EasyAnimateV5_I2VSampler(EasyAnimateI2VSampler):
             },
         }
 
-def vdm_process(easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video=None, control_video=None, ref_image=None, start_image=None, end_image=None, camera_conditions=None, teacache_threshold=0.10, enable_teacache=False):
+def vdm_process(easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, control_video=None, start_image=None, teacache_threshold=0.10, enable_teacache=False):
     global transformer_cpu_cache
     global lora_path_before
 
@@ -968,7 +968,7 @@ class EasyAnimateV2VSampler:
     FUNCTION = "process"
     CATEGORY = "EasyAnimateWrapper"
 
-    def process(self, easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video=None, control_video=None, ref_image=None, start_image=None, start_index=0, end_image=None, camera_conditions=None, teacache_threshold=0.10, enable_teacache=False):
+    def process(self, easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, control_video=None, start_image=None, start_index=0, teacache_threshold=0.10, enable_teacache=False):
 
         forward_total = video_length - start_index
         reverse_total = start_index + 1
@@ -1027,7 +1027,7 @@ class EasyAnimateV2VSampler:
 
                     #now you can generate some frames
 
-                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, chain_control, ref_image, current_start, end_image, camera_conditions, teacache_threshold, enable_teacache)
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
                     
                     #so now you need to truncate these frames to get rid of the padding
                     subchain = subchain[:render_length,:,:,:]
@@ -1042,7 +1042,7 @@ class EasyAnimateV2VSampler:
                     #a normal 49 frame chain
                     chain_control = forward_control[control_index:control_index+num_frames,:,:,:]
                     control_index += num_frames-1
-                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, num_frames, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, chain_control, ref_image, current_start, end_image, camera_conditions, teacache_threshold, enable_teacache)
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, num_frames, base_resolution, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
                     
                     if forward_chain == None: 
                         forward_chain = subchain
@@ -1085,7 +1085,7 @@ class EasyAnimateV2VSampler:
 
                     #now you can generate some frames
 
-                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, chain_control, ref_image, current_start, end_image, camera_conditions, teacache_threshold, enable_teacache)
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
                     
                     #so now you need to truncate these frames to get rid of the padding
                     subchain = subchain[:render_length,:,:,:]
@@ -1100,7 +1100,7 @@ class EasyAnimateV2VSampler:
                     #a normal 49 frame chain
                     chain_control = reverse_control[control_index:control_index+num_frames,:,:,:]
                     control_index += num_frames-1
-                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, num_frames, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, chain_control, ref_image, current_start, end_image, camera_conditions, teacache_threshold, enable_teacache)
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, num_frames, base_resolution, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
                     
                     if reverse_chain == None: 
                         reverse_chain = subchain
