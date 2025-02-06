@@ -800,7 +800,7 @@ class EasyAnimateV5_I2VSampler(EasyAnimateI2VSampler):
             },
         }
 
-def vdm_process(easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, control_video=None, start_image=None, teacache_threshold=0.10, enable_teacache=False):
+def vdm_process(easyanimate_model, prompt, negative_prompt, video_length, video_width, video_height, seed, steps, cfg, denoise_strength, scheduler, control_video=None, start_image=None, teacache_threshold=0.10, enable_teacache=False):
     global transformer_cpu_cache
     global lora_path_before
 
@@ -816,24 +816,18 @@ def vdm_process(easyanimate_model, prompt, negative_prompt, video_length, base_r
     weight_dtype = easyanimate_model['dtype']
     model_type = easyanimate_model['model_type']
 
-    # Count most suitable height and width
-    aspect_ratio_sample_size    = {key : [x / 512 * base_resolution for x in ASPECT_RATIO_512[key]] for key in ASPECT_RATIO_512.keys()}
-
-    if control_video is not None and type(control_video) is str:
-        original_width, original_height = Image.fromarray(cv2.VideoCapture(control_video).read()[1]).size
-    elif control_video is not None:
+    if control_video is not None:
         control_video = np.array(control_video.cpu().numpy() * 255, np.uint8)
-        original_width, original_height = Image.fromarray(control_video[0]).size
-    else:
-        original_width, original_height = 384 / 512 * base_resolution, 672 / 512 * base_resolution
 
     #here - start by validating the start_image and the end_image 
     if start_image is not None:
         start_image = [to_pil(start_image) for start_image in start_image]
-        original_width, original_height = start_image[0].size if type(start_image) is list else Image.open(start_image).size
 
-    closest_size, closest_ratio = get_closest_ratio(original_height, original_width, ratios=aspect_ratio_sample_size)
-    height, width = [int(x / 16) * 16 for x in closest_size]
+
+    # you need the height and width to leverage the latents and pipeline 
+    # should be divisable by 16
+    width = video_width
+    height = video_height
 
     # Load Sampler
     pipeline.scheduler = all_cheduler_dict[scheduler].from_pretrained(model_name, subfolder='scheduler')
@@ -921,13 +915,11 @@ class EasyAnimateV2VSampler:
                 "video_length": (
                     "INT", {"default": 72, "min": 8, "max": 144, "step": 8}
                 ),
-                "base_resolution": (
-                    [ 
-                        512,
-                        768,
-                        960,
-                        1024,
-                    ], {"default": 768}
+                "video_width": (
+                    "INT", {"default": 512, "min": 8, "max": 2048, "step": 8}
+                ),
+                "video_height": (
+                    "INT", {"default": 512, "min": 8, "max": 2048, "step": 8}
                 ),
                 "seed": (
                     "INT", {"default": 43, "min": 0, "max": 0xffffffffffffffff}
@@ -968,7 +960,7 @@ class EasyAnimateV2VSampler:
     FUNCTION = "process"
     CATEGORY = "EasyAnimateWrapper"
 
-    def process(self, easyanimate_model, prompt, negative_prompt, video_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, control_video=None, start_image=None, start_index=0, teacache_threshold=0.10, enable_teacache=False):
+    def process(self, easyanimate_model, prompt, negative_prompt, video_length, video_width, video_height, seed, steps, cfg, denoise_strength, scheduler, control_video=None, start_image=None, start_index=0, teacache_threshold=0.10, enable_teacache=False):
 
         forward_total = video_length - start_index
         reverse_total = start_index + 1
@@ -1027,7 +1019,7 @@ class EasyAnimateV2VSampler:
 
                     #now you can generate some frames
 
-                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, video_width, video_height, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
                     
                     #so now you need to truncate these frames to get rid of the padding
                     subchain = subchain[:render_length,:,:,:]
@@ -1042,7 +1034,7 @@ class EasyAnimateV2VSampler:
                     #a normal 49 frame chain
                     chain_control = forward_control[control_index:control_index+num_frames,:,:,:]
                     control_index += num_frames-1
-                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, num_frames, base_resolution, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, num_frames, video_width, video_height, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
                     
                     if forward_chain == None: 
                         forward_chain = subchain
@@ -1085,7 +1077,7 @@ class EasyAnimateV2VSampler:
 
                     #now you can generate some frames
 
-                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, video_width, video_height, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
                     
                     #so now you need to truncate these frames to get rid of the padding
                     subchain = subchain[:render_length,:,:,:]
@@ -1100,7 +1092,7 @@ class EasyAnimateV2VSampler:
                     #a normal 49 frame chain
                     chain_control = reverse_control[control_index:control_index+num_frames,:,:,:]
                     control_index += num_frames-1
-                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, num_frames, base_resolution, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, num_frames, video_width, video_height, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
                     
                     if reverse_chain == None: 
                         reverse_chain = subchain
@@ -1137,13 +1129,11 @@ class EasyAnimateV5_V2VSampler(EasyAnimateV2VSampler):
                 "video_length": (
                     "INT", {"default": 49, "min": 1, "max": 49, "step": 4}
                 ),
-                "base_resolution": (
-                    [ 
-                        512,
-                        768,
-                        960,
-                        1024,
-                    ], {"default": 768}
+                "video_width": (
+                    "INT", {"default": 512, "min": 8, "max": 2048, "step": 8}
+                ),
+                "video_height": (
+                    "INT", {"default": 512, "min": 8, "max": 2048, "step": 8}
                 ),
                 "seed": (
                     "INT", {"default": 43, "min": 0, "max": 0xffffffffffffffff}
