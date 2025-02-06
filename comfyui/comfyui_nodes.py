@@ -1052,12 +1052,12 @@ class EasyAnimateV2VSampler:
 
                     #first get how many frames you have remaining 
                     remaining_frames = forward_total - (chain * 49)
-                    print("remaining_frames: " + str(remaining_frames))
+                    print("Remaining Frames: " + str(remaining_frames))
 
                     #so now you wnat to get how many frames you can actually render 
 
                     render_length = get_allowed_length(remaining_frames)
-                    print("allowed render length: " + str(render_length))
+                    print("Allowed Render Length: " + str(render_length))
                     #so now this is probably more than you need so you need to create a chain control that will work with this 
 
                     chain_control = forward_control[control_index:,:,:,:] #this is the rest of the the forward_control
@@ -1066,8 +1066,6 @@ class EasyAnimateV2VSampler:
                     pad = render_length - remaining_frames
 
                     chain_control = torch.cat((chain_control, chain_control[:pad,:,:,:]), dim=0) #this should get you upto the required num frames
-
-                    print("chain control length: " + str(chain_control.shape[0]))
 
                     #now you can generate some frames
 
@@ -1112,12 +1110,12 @@ class EasyAnimateV2VSampler:
 
                     #first get how many frames you have remaining 
                     remaining_frames = reverse_total - (chain * 49)
-                    print("remaining_frames: " + str(remaining_frames))
+                    print("Remaining Frames: " + str(remaining_frames))
 
                     #so now you wnat to get how many frames you can actually render 
 
                     render_length = get_allowed_length(remaining_frames)
-                    print("allowed render length: " + str(render_length))
+                    print("Allowed Render Length: " + str(render_length))
                     #so now this is probably more than you need so you need to create a chain control that will work with this 
 
                     chain_control = reverse_control[control_index:,:,:,:] #this is the rest of the the reverse_control
@@ -1126,8 +1124,6 @@ class EasyAnimateV2VSampler:
                     pad = render_length - remaining_frames
 
                     chain_control = torch.cat((chain_control, chain_control[:pad,:,:,:]), dim=0) #this should get you upto the required num frames
-
-                    print("chain control length: " + str(chain_control.shape[0]))
 
                     #now you can generate some frames
 
