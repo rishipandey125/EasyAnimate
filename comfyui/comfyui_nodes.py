@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import copy
+from math import ceil
 from comfy.utils import ProgressBar, load_torch_file
 from diffusers import (AutoencoderKL, DDIMScheduler,
                        DPMSolverMultistepScheduler,
@@ -1016,7 +1017,7 @@ class EasyAnimateV2VSampler:
 
         forward_control = None
         reverse_control = None
-        #then we want to compute the forward pass of frames
+        # then we want to compute the forward pass of frames
         if forward_total > 0: 
             forward_control = control_video[start_index:,:,:,:]
         
@@ -1024,27 +1025,146 @@ class EasyAnimateV2VSampler:
             reverse_control = control_video[:start_index+1,:,:,:]
             reverse_control = reverse_control.flip(0)
             
-        # call forward chain
+        # ---- Helper: Get Allowed Subchain Length (4n+1 rule) ----
+        def get_allowed_length(desired):
+            # desired: desired total frames in this subchain (including the starting frame)
+            if desired <= 1:
+                return 1
+            allowed = [5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49]
+            for a in allowed:
+                if desired <= a:
+                    return a
+            return 49
+
+        # --- Forward Chain Processing (subchains) ---
         if forward_total > 1: 
-            #integrate logic here to handle the forward chain + sub chains 
-            forward_chain = vdm_process(easyanimate_model, prompt, negative_prompt, forward_total, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, forward_control, ref_image, start_image, end_image, camera_conditions, teacache_threshold, enable_teacache)
+            forward_chain = None 
+
+            current_start = start_image  # assume start_image is already in the proper format
+            control_index = 0
+
+            num_chains = ceil(forward_total/49)
+            print("Forward Chain")
+            for chain in range(num_chains):
+                num_frames = 49
+                if chain == num_chains-1:
+                    print("Final Chain")
+                    #this is the final chain and could be < 49 frames
+
+                    #first get how many frames you have remaining 
+                    remaining_frames = forward_total - (chain * 49)
+                    print("remaining_frames: " + str(remaining_frames))
+
+                    #so now you wnat to get how many frames you can actually render 
+
+                    render_length = get_allowed_length(remaining_frames)
+                    print("allowed render length: " + str(render_length))
+                    #so now this is probably more than you need so you need to create a chain control that will work with this 
+
+                    chain_control = forward_control[control_index:] #this is the rest of the the forward_control
+                    
+                    #now add some padding to that 
+                    pad = render_length - remaining_frames
+
+                    chain_control = torch.cat((chain_control, chain_control[:pad]), dim=0) #this should get you upto the required num frames
+
+                    print("chain control length: " + str(chain_control.shape[0]))
+
+                    #now you can generate some frames
+
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, chain_control, ref_image, current_start, end_image, camera_conditions, teacache_threshold, enable_teacache)
+                    
+                    #so now you need to truncate these frames to get rid of the padding
+                    subchain = subchain[:render_length,:,:,:]
+
+                    if forward_chain == None: 
+                        forward_chain = subchain
+                    else:
+                        forward_chain = torch.cat((forward_chain, subchain[1:]), dim=0)
+                    #you don't need to update current start
+                else: 
+                    print("Chain " + str(chain+1))
+                    #a normal 49 frame chain
+                    chain_control = forward_control[control_index:control_index+(num_frames-1)]
+                    control_index += num_frames-1
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, num_frames, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, chain_control, ref_image, current_start, end_image, camera_conditions, teacache_threshold, enable_teacache)
+                    
+                    if forward_chain == None: 
+                        forward_chain = subchain
+                    else:
+                        forward_chain = torch.cat((forward_chain, subchain[1:]), dim=0)
+                    current_start = subchain[-1,:,:,:]
         else:
             forward_chain = start_image
 
-
-        # call backward chain
+        # --- Reverse Chain Processing (subchains) ---
         if reverse_total > 1: 
-            #integrate logic here to handle the forward chain + sub chains
-            reverse_chain = vdm_process(easyanimate_model, prompt, negative_prompt, forward_total, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, reverse_control, ref_image, start_image, end_image, camera_conditions, teacache_threshold, enable_teacache)
+            reverse_chain = None 
+
+            current_start = start_image  # assume start_image is already in the proper format
+            control_index = 0
+
+            num_chains = ceil(reverse_total/49)
+            print("Reverse Chain")
+            for chain in range(num_chains):
+                num_frames = 49
+                if chain == num_chains-1:
+                    print("Final Chain")
+                    #this is the final chain and could be < 49 frames
+
+                    #first get how many frames you have remaining 
+                    remaining_frames = reverse_total - (chain * 49)
+                    print("remaining_frames: " + str(remaining_frames))
+
+                    #so now you wnat to get how many frames you can actually render 
+
+                    render_length = get_allowed_length(remaining_frames)
+                    print("allowed render length: " + str(render_length))
+                    #so now this is probably more than you need so you need to create a chain control that will work with this 
+
+                    chain_control = reverse_control[control_index:] #this is the rest of the the reverse_control
+                    
+                    #now add some padding to that 
+                    pad = render_length - remaining_frames
+
+                    chain_control = torch.cat((chain_control, chain_control[:pad]), dim=0) #this should get you upto the required num frames
+
+                    print("chain control length: " + str(chain_control.shape[0]))
+
+                    #now you can generate some frames
+
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, chain_control, ref_image, current_start, end_image, camera_conditions, teacache_threshold, enable_teacache)
+                    
+                    #so now you need to truncate these frames to get rid of the padding
+                    subchain = subchain[:render_length,:,:,:]
+
+                    if reverse_chain == None: 
+                        reverse_chain = subchain
+                    else:
+                        reverse_chain = torch.cat((reverse_chain, subchain[1:]), dim=0)
+                    #you don't need to update current start
+                else: 
+                    print("Chain " + str(chain+1))
+                    #a normal 49 frame chain
+                    chain_control = reverse_control[control_index:control_index+(num_frames-1)]
+                    control_index += num_frames-1
+                    subchain = vdm_process(easyanimate_model, prompt, negative_prompt, num_frames, base_resolution, seed, steps, cfg, denoise_strength, scheduler, validation_video, chain_control, ref_image, current_start, end_image, camera_conditions, teacache_threshold, enable_teacache)
+                    
+                    if reverse_chain == None: 
+                        reverse_chain = subchain
+                    else:
+                        reverse_chain = torch.cat((reverse_chain, subchain[1:]), dim=0)
+                    current_start = subchain[-1,:,:,:]
+            # Flip reverse_chain back into chronological order.
             reverse_chain = reverse_chain.flip(0)
-            #flip that shit back 
         else:
             reverse_chain = start_image
-        
-        #combine the chains 
+
+        # ---- Merge the chains: remove duplicate stylized frame at junction ----
         merged_chain = torch.cat((reverse_chain, forward_chain[1:]), dim=0)
 
-        return (merged_chain,)   
+        return (merged_chain,)
+
 
 
 class EasyAnimateV5_V2VSampler(EasyAnimateV2VSampler):
