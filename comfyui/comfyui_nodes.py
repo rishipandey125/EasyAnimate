@@ -16,7 +16,9 @@ from comfy.utils import ProgressBar, load_torch_file
 from diffusers import (AutoencoderKL, DDIMScheduler,
                        DPMSolverMultistepScheduler,
                        EulerAncestralDiscreteScheduler, EulerDiscreteScheduler,
+                       FlowMatchEulerDiscreteScheduler,
                        PNDMScheduler)
+
 from einops import rearrange
 from omegaconf import OmegaConf
 from PIL import Image
@@ -41,7 +43,19 @@ from ..easyanimate.utils.lora_utils import merge_lora, unmerge_lora
 from ..easyanimate.utils.utils import (get_image_to_video_latent, get_image_latent,
                                        get_video_to_video_latent)
 from ..easyanimate.utils.fp8_optimization import convert_weight_dtype_wrapper
-from ..easyanimate.ui.ui import ddpm_scheduler_dict, flow_scheduler_dict, all_cheduler_dict
+
+
+ddpm_scheduler_dict = {
+    "Euler": EulerDiscreteScheduler,
+    "Euler A": EulerAncestralDiscreteScheduler,
+    "DPM++": DPMSolverMultistepScheduler, 
+    "PNDM": PNDMScheduler,
+    "DDIM": DDIMScheduler,
+}
+flow_scheduler_dict = {
+    "Flow": FlowMatchEulerDiscreteScheduler,
+}
+all_cheduler_dict = {**ddpm_scheduler_dict, **flow_scheduler_dict}
 
 # Compatible with Alibaba EAS for quick launch
 eas_cache_dir           = '/stable-diffusion-cache/models'
