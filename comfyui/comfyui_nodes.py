@@ -1036,7 +1036,8 @@ class EasyAnimateV2VSampler:
                     subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, video_width, video_height, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
                     
                     #so now you need to truncate these frames to get rid of the padding
-                    subchain = subchain[:render_length,:,:,:]
+                    # looks like the truncate here isn't working 
+                    subchain = subchain[:remaining_frames,:,:,:]
 
                     if forward_chain == None: 
                         forward_chain = subchain
@@ -1094,7 +1095,7 @@ class EasyAnimateV2VSampler:
                     subchain = vdm_process(easyanimate_model, prompt, negative_prompt, render_length, video_width, video_height, seed, steps, cfg, denoise_strength, scheduler, chain_control, current_start, teacache_threshold, enable_teacache)
                     
                     #so now you need to truncate these frames to get rid of the padding
-                    subchain = subchain[:render_length,:,:,:]
+                    subchain = subchain[:remaining_frames,:,:,:]
 
                     if reverse_chain == None: 
                         reverse_chain = subchain
