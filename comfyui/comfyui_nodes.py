@@ -1059,12 +1059,14 @@ class EasyAnimateV2VSampler:
             return render_chain
 
         if forward_total > 1: 
+            print("Forward")
             forward_chain = render_chain(forward_total, forward_control, start_image)
         else:
             forward_chain = start_image
 
         # --- Reverse Chain Processing (subchains) ---
         if reverse_total > 1: 
+            print("Reverse")
             reverse_chain = render_chain(reverse_total, reverse_control, start_image)
             # Flip reverse_chain back into chronological order.
             reverse_chain = reverse_chain.flip(0)
@@ -1074,7 +1076,7 @@ class EasyAnimateV2VSampler:
         print("Merging Chains")
         # ---- Merge the chains: remove duplicate stylized frame at junction ----
         merged_chain = torch.cat((reverse_chain, forward_chain[1:]), dim=0)
-
+        print("Rendered " + str(merged_chain.size(0)) + " Frames")
         return (merged_chain,)
 
 
