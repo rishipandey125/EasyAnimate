@@ -39,9 +39,26 @@ from ..easyanimate.pipeline.pipeline_easyanimate_control import \
 from ..easyanimate.utils.lora_utils import merge_lora, unmerge_lora
 from ..easyanimate.utils.utils import (get_image_to_video_latent, get_image_latent,
                                        get_video_to_video_latent)
+<<<<<<< Updated upstream
 from ..easyanimate.utils.fp8_optimization import (convert_model_weight_to_float8,
                                                 convert_weight_dtype_wrapper)
 from ..easyanimate.ui.ui import ddpm_scheduler_dict, flow_scheduler_dict, all_cheduler_dict
+=======
+from ..easyanimate.utils.fp8_optimization import (convert_model_weight_to_float8, convert_weight_dtype_wrapper)
+
+
+ddpm_scheduler_dict = {
+    "Euler": EulerDiscreteScheduler,
+    "Euler A": EulerAncestralDiscreteScheduler,
+    "DPM++": DPMSolverMultistepScheduler, 
+    "PNDM": PNDMScheduler,
+    "DDIM": DDIMScheduler,
+}
+flow_scheduler_dict = {
+    "Flow": FlowMatchEulerDiscreteScheduler,
+}
+all_cheduler_dict = {**ddpm_scheduler_dict, **flow_scheduler_dict}
+>>>>>>> Stashed changes
 
 # Compatible with Alibaba EAS for quick launch
 eas_cache_dir           = '/stable-diffusion-cache/models'
@@ -185,6 +202,7 @@ class LoadEasyAnimateModel:
         # Update pbar
         pbar.update(1)
 
+        print("Getting Transformer")
         # Get Transformer
         Choosen_Transformer3DModel = name_to_transformer3d[
             config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel')
@@ -201,6 +219,8 @@ class LoadEasyAnimateModel:
             torch_dtype=torch.float8_e4m3fn if GPU_memory_mode == "model_cpu_offload_and_qfloat8" else weight_dtype,
             low_cpu_mem_usage=True,
         )
+
+        print("Transformer Loaded")
         # Update pbar
         pbar.update(1) 
 

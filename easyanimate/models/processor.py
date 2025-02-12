@@ -420,7 +420,11 @@ class EasyAnimateSWAttnProcessor2_0:
         
         # apply attention
         hidden_states = flash_attn_func(query, key, value, dropout_p=0.0, causal=False, window_size=(windows_size, windows_size))
+<<<<<<< Updated upstream
 
+=======
+        
+>>>>>>> Stashed changes
         hidden_states = torch.tensor_split(hidden_states, 6, 2)
         new_hidden_states = [hidden_states[0]]
         for index, mode in enumerate(
