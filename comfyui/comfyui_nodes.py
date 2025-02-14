@@ -987,7 +987,6 @@ class EasyAnimateV2VSampler:
         
         if reverse_total > 0:
             reverse_control = control_video[:start_index+1,:,:,:]
-            reverse_control = reverse_control.flip(0)
             
         # ---- Helper: Get Allowed Subchain Length (4n+1 rule) ----
         def get_allowed_length(desired):
@@ -1008,6 +1007,8 @@ class EasyAnimateV2VSampler:
             control_index = 0
 
             num_chains = ceil(total/49)
+
+
             for chain in range(num_chains):
                 num_frames = 49
                 if chain == num_chains-1:
@@ -1058,24 +1059,43 @@ class EasyAnimateV2VSampler:
                     current_start = subchain[-1:,:,:,:]
             return render_chain
 
+        forward_chain = None
         if forward_total > 1: 
             print("Forward")
             forward_chain = render_chain(forward_total, forward_control, start_image)
-        else:
-            forward_chain = start_image
 
+
+        reverse_chain = None
         # --- Reverse Chain Processing (subchains) ---
         if reverse_total > 1: 
             print("Reverse")
+            #here when doing the reverse pass - we should actually make the start image the second frame of the generated path
+            if (forward_chain.size(0) > 1):
+                print("Adding 1 Frame to Reverse Process")
+                start_image = forward_chain[1:2,:,:,:] #make the reverse chain start from the frame after the init 
+                reverse_total += 1 #add 1 to reverse total
+                reverse_control = torch.cat((reverse_control, forward_control[1:2,:,:,:]), dim=0) #add the correct control image
+
+            reverse_control = reverse_control.flip(0)
             reverse_chain = render_chain(reverse_total, reverse_control, start_image)
             # Flip reverse_chain back into chronological order.
             reverse_chain = reverse_chain.flip(0)
-        else:
-            reverse_chain = start_image
 
         print("Merging Chains")
         # ---- Merge the chains: remove duplicate stylized frame at junction ----
-        merged_chain = torch.cat((reverse_chain, forward_chain[1:]), dim=0)
+        #it is really the merge that needs to be modified now 
+
+        merged_chain = None
+
+        if (forward_chain != None and reverse_chain != None): 
+            merged_chain = torch.cat((reverse_chain[:-1], forward_chain[1:]), dim=0)
+
+        if (merged_chain == None):
+            merged_chain = forward_chain
+        
+        if (merged_chain == None):
+            merged_chain = reverse_chain
+        
         print("Rendered " + str(merged_chain.size(0)) + " Frames")
         return (merged_chain,)
 
